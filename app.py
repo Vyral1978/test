@@ -1,92 +1,96 @@
+import spaces
 import gradio as gr
 import numpy as np
+import PIL.Image
+from PIL import Image
 import random
-
-# import spaces #[uncomment to use ZeroGPU]
-from diffusers import DiffusionPipeline
+from diffusers import StableDiffusionXLPipeline
+from diffusers import EulerAncestralDiscreteScheduler
 import torch
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-model_repo_id = "stabilityai/sdxl-turbo"  # Replace to the model you would like to use
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-if torch.cuda.is_available():
-    torch_dtype = torch.float16
-else:
-    torch_dtype = torch.float32
+# Make sure to use torch.float16 consistently throughout the pipeline
+pipe = StableDiffusionXLPipeline.from_pretrained(
+    "votepurchase/pornmasterPro_noobV3VAE",
+    torch_dtype=torch.float16,
+    variant="fp16",  # Explicitly use fp16 variant
+    use_safetensors=True  # Use safetensors if available
+)
 
-pipe = DiffusionPipeline.from_pretrained(model_repo_id, torch_dtype=torch_dtype)
-pipe = pipe.to(device)
+pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+pipe.to(device)
+
+# Force all components to use the same dtype
+pipe.text_encoder.to(torch.float16)
+pipe.text_encoder_2.to(torch.float16)
+pipe.vae.to(torch.float16)
+pipe.unet.to(torch.float16)
 
 MAX_SEED = np.iinfo(np.int32).max
-MAX_IMAGE_SIZE = 1024
-
-
-# @spaces.GPU #[uncomment to use ZeroGPU]
-def infer(
-    prompt,
-    negative_prompt,
-    seed,
-    randomize_seed,
-    width,
-    height,
-    guidance_scale,
-    num_inference_steps,
-    progress=gr.Progress(track_tqdm=True),
-):
+MAX_IMAGE_SIZE = 1216
+    
+@spaces.GPU
+def infer(prompt, negative_prompt, seed, randomize_seed, width, height, guidance_scale, num_inference_steps):
+    # Check and truncate prompt if too long (CLIP can only handle 77 tokens)
+    if len(prompt.split()) > 60:  # Rough estimate to avoid exceeding token limit
+        print("Warning: Prompt may be too long and will be truncated by the model")
+        
     if randomize_seed:
         seed = random.randint(0, MAX_SEED)
 
-    generator = torch.Generator().manual_seed(seed)
+    generator = torch.Generator(device=device).manual_seed(seed)
+    
+    try:
+        output_image = pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps,
+            width=width,
+            height=height,
+            generator=generator
+        ).images[0]
+        
+        return output_image
+    except RuntimeError as e:
+        print(f"Error during generation: {e}")
+        # Return a blank image with error message
+        error_img = Image.new('RGB', (width, height), color=(0, 0, 0))
+        return error_img
 
-    image = pipe(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        guidance_scale=guidance_scale,
-        num_inference_steps=num_inference_steps,
-        width=width,
-        height=height,
-        generator=generator,
-    ).images[0]
-
-    return image, seed
-
-
-examples = [
-    "Astronaut in a jungle, cold color palette, muted colors, detailed, 8k",
-    "An astronaut riding a green horse",
-    "A delicious ceviche cheesecake slice",
-]
 
 css = """
 #col-container {
     margin: 0 auto;
-    max-width: 640px;
+    max-width: 520px;
 }
 """
 
 with gr.Blocks(css=css) as demo:
+
     with gr.Column(elem_id="col-container"):
-        gr.Markdown(" # Text-to-Image Gradio Template")
 
         with gr.Row():
             prompt = gr.Text(
                 label="Prompt",
                 show_label=False,
                 max_lines=1,
-                placeholder="Enter your prompt",
+                placeholder="Enter your prompt (keep it under 60 words for best results)",
                 container=False,
             )
 
-            run_button = gr.Button("Run", scale=0, variant="primary")
+            run_button = gr.Button("Run", scale=0)
 
         result = gr.Image(label="Result", show_label=False)
-
+        
         with gr.Accordion("Advanced Settings", open=False):
+
             negative_prompt = gr.Text(
                 label="Negative prompt",
                 max_lines=1,
                 placeholder="Enter a negative prompt",
-                visible=False,
+                value="nsfw, (low quality, worst quality:1.2), very displeasing, 3d, watermark, signature, ugly, poorly drawn"
             )
 
             seed = gr.Slider(
@@ -105,7 +109,7 @@ with gr.Blocks(css=css) as demo:
                     minimum=256,
                     maximum=MAX_IMAGE_SIZE,
                     step=32,
-                    value=1024,  # Replace with defaults that work for your model
+                    value=1024,
                 )
 
                 height = gr.Slider(
@@ -113,42 +117,30 @@ with gr.Blocks(css=css) as demo:
                     minimum=256,
                     maximum=MAX_IMAGE_SIZE,
                     step=32,
-                    value=1024,  # Replace with defaults that work for your model
+                    value=1024,
                 )
 
             with gr.Row():
                 guidance_scale = gr.Slider(
                     label="Guidance scale",
                     minimum=0.0,
-                    maximum=10.0,
+                    maximum=20.0,
                     step=0.1,
-                    value=0.0,  # Replace with defaults that work for your model
+                    value=7,
                 )
 
                 num_inference_steps = gr.Slider(
                     label="Number of inference steps",
                     minimum=1,
-                    maximum=50,
+                    maximum=28,
                     step=1,
-                    value=2,  # Replace with defaults that work for your model
+                    value=28,
                 )
 
-        gr.Examples(examples=examples, inputs=[prompt])
-    gr.on(
-        triggers=[run_button.click, prompt.submit],
+    run_button.click(
         fn=infer,
-        inputs=[
-            prompt,
-            negative_prompt,
-            seed,
-            randomize_seed,
-            width,
-            height,
-            guidance_scale,
-            num_inference_steps,
-        ],
-        outputs=[result, seed],
+        inputs=[prompt, negative_prompt, seed, randomize_seed, width, height, guidance_scale, num_inference_steps],
+        outputs=[result]
     )
 
-if __name__ == "__main__":
-    demo.launch()
+demo.queue().launch()
