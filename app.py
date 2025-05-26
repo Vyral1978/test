@@ -7,6 +7,7 @@ import random
 from diffusers import StableDiffusionXLPipeline
 from diffusers import EulerAncestralDiscreteScheduler
 import torch
+from compel import Compel, ReturnedEmbeddingsType
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -27,21 +28,59 @@ pipe.text_encoder_2.to(torch.float16)
 pipe.vae.to(torch.float16)
 pipe.unet.to(torch.float16)
 
+# 追加: Initialize Compel for long prompt processing
+compel = Compel(
+    tokenizer=[pipe.tokenizer, pipe.tokenizer_2],
+    text_encoder=[pipe.text_encoder, pipe.text_encoder_2],
+    returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+    requires_pooled=[False, True],
+    truncate_long_prompts=False
+)
+
 MAX_SEED = np.iinfo(np.int32).max
 MAX_IMAGE_SIZE = 1216
+
+# 追加: Simple long prompt processing function
+def process_long_prompt(prompt, negative_prompt=""):
+    """Simple long prompt processing using Compel"""
+    try:
+        conditioning, pooled = compel([prompt, negative_prompt])
+        return conditioning, pooled
+    except Exception as e:
+        print(f"Long prompt processing failed: {e}, falling back to standard processing")
+        return None, None
     
 @spaces.GPU
 def infer(prompt, negative_prompt, seed, randomize_seed, width, height, guidance_scale, num_inference_steps):
-    # Check and truncate prompt if too long (CLIP can only handle 77 tokens)
-    if len(prompt.split()) > 60:  # Rough estimate to avoid exceeding token limit
-        print("Warning: Prompt may be too long and will be truncated by the model")
-        
+    # 変更: Remove the 60-word limit warning and add long prompt check
+    use_long_prompt = len(prompt.split()) > 60 or len(prompt) > 300
+    
     if randomize_seed:
         seed = random.randint(0, MAX_SEED)
 
     generator = torch.Generator(device=device).manual_seed(seed)
     
     try:
+        # 追加: Try long prompt processing first if prompt is long
+        if use_long_prompt:
+            print("Using long prompt processing...")
+            conditioning, pooled = process_long_prompt(prompt, negative_prompt)
+            
+            if conditioning is not None:
+                output_image = pipe(
+                    prompt_embeds=conditioning[0:1],
+                    pooled_prompt_embeds=pooled[0:1],
+                    negative_prompt_embeds=conditioning[1:2],
+                    negative_pooled_prompt_embeds=pooled[1:2],
+                    guidance_scale=guidance_scale,
+                    num_inference_steps=num_inference_steps,
+                    width=width,
+                    height=height,
+                    generator=generator
+                ).images[0]
+                return output_image
+        
+        # Fall back to standard processing
         output_image = pipe(
             prompt=prompt,
             negative_prompt=negative_prompt,
@@ -76,7 +115,7 @@ with gr.Blocks(css=css) as demo:
                 label="Prompt",
                 show_label=False,
                 max_lines=1,
-                placeholder="Enter your prompt (keep it under 60 words for best results)",
+                placeholder="Enter your prompt (long prompts are automatically supported)",  # 変更: Updated placeholder
                 container=False,
             )
 
