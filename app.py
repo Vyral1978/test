@@ -9,24 +9,20 @@ from diffusers import EulerAncestralDiscreteScheduler
 import torch
 from compel import Compel, ReturnedEmbeddingsType
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
 # Make sure to use torch.float16 consistently throughout the pipeline
 pipe = StableDiffusionXLPipeline.from_pretrained(
     "votepurchase/pornmasterPro_noobV3VAE",
-    torch_dtype=torch.float16,
-    variant="fp16",  # Explicitly use fp16 variant
-    use_safetensors=True  # Use safetensors if available
+    torch_dtype=torch.float32,
+    variant="fp16",
+    use_safetensors=True
 )
 
 pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
 pipe.to(device)
 
 # Force all components to use the same dtype
-pipe.text_encoder.to(torch.float16)
-pipe.text_encoder_2.to(torch.float16)
-pipe.vae.to(torch.float16)
-pipe.unet.to(torch.float16)
 
 # 追加: Initialize Compel for long prompt processing
 compel = Compel(
